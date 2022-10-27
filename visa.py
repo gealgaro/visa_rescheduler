@@ -4,6 +4,7 @@ import time
 import json
 import random
 import platform
+import traceback
 import configparser
 from datetime import datetime
 
@@ -36,7 +37,7 @@ PUSH_USER = config['PUSHOVER']['PUSH_USER']
 LOCAL_USE = config['CHROMEDRIVER'].getboolean('LOCAL_USE')
 HUB_ADDRESS = config['CHROMEDRIVER']['HUB_ADDRESS']
 
-REGEX_CONTINUE = "//a[contains(text(),'Continuar')]"
+REGEX_CONTINUE = "//a[contains(text(),'Continue')]" if COUNTRY_CODE.startswith('en') else "//a[contains(text(),'Continuar')]"
 
 
 # def MY_CONDITION(month, day): return int(month) == 11 and int(day) >= 5
@@ -44,8 +45,8 @@ def MY_CONDITION(month, day): return True # No custom condition wanted for the n
 
 STEP_TIME = 0.5  # time between steps (interactions with forms): 0.5 seconds
 RETRY_TIME = 60*10  # wait time between retries/checks for available dates: 10 minutes
+COOLDOWN_TIME = 60*300  # wait time when temporary banned (empty list): originally 60 minutes, updated to make it 5 hours
 EXCEPTION_TIME = 60*30  # wait time when an exception occurs: 30 minutes
-COOLDOWN_TIME = 60*60  # wait time when temporary banned (empty list): 60 minutes
 
 DATE_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment/days/{FACILITY_ID}.json?appointments[expedite]=false"
 TIME_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment/times/{FACILITY_ID}.json?date=%s&appointments[expedite]=false"
@@ -68,8 +69,9 @@ def send_notification(msg):
             print(response.status_code)
             print(response.body)
             print(response.headers)
-        except Exception as e:
-            print(e.message)
+        except:
+            print('\nSendGrid exception:')
+            traceback.print_exc()
 
     if PUSH_TOKEN:
         url = "https://api.pushover.net/1/messages.json"
@@ -167,6 +169,11 @@ def reschedule(date):
     time = get_time(date)
     driver.get(APPOINTMENT_URL)
 
+    # This condition is required for the case when there's more than one applicant. This has not been tested properly
+    btn = driver.find_element(By.NAME, 'commit')
+    if btn:
+        btn.click()
+
     data = {
         "utf8": driver.find_element(by=By.NAME, value='utf8').get_attribute('value'),
         "authenticity_token": driver.find_element(by=By.NAME, value='authenticity_token').get_attribute('value'),
@@ -237,46 +244,55 @@ def push_notification(dates):
     send_notification(msg)
 
 
-if __name__ == "__main__":
+def main():
+    val = input(f"Please confirm your current appointment date is {MY_SCHEDULE_DATE}. Any value other than 'y' or 'yes' cancels: ")
+    if val != 'y' and val != 'yes':
+        driver.quit()
+        print('------------------exit')
+        return
+
     login()
     retry_count = 0
     while 1:
         if retry_count > 6:
             break
         try:
-            print("------------------")
-            print(datetime.today())
-            print(f"Retry count: {retry_count}")
-            print()
+            print("\n------------------")
+            print(f"Attempt: {datetime.today()}")
+            print(f"Retry count: {retry_count}\n")
 
             dates = get_date()[:5]
             if not dates:
-              msg = "List is empty"
-              send_notification(msg)
-              EXIT = True
-            print_dates(dates)
-            date = get_available_date(dates)
-            print()
-            print(f"New date: {date}")
-            if date:
-                reschedule(date)
-                push_notification(dates)
+                retry_count += 1
+                msg = "No US Visa appointment dates. List is empty"
+                send_notification(msg)
+            else:
+                retry_count = 0
+                print_dates(dates)
+                date = get_available_date(dates)
+                print(f"\nNew date: {date}")
+                if date:
+                    reschedule(date)
+                    push_notification(dates)
 
             if(EXIT):
                 print("------------------exit")
                 break
 
             if not dates:
-              msg = "List is empty"
-              send_notification(msg)
-              #EXIT = True
-              time.sleep(COOLDOWN_TIME)
+                print("Cooling down...")
+                time.sleep(COOLDOWN_TIME)
             else:
-              time.sleep(RETRY_TIME)
+                time.sleep(RETRY_TIME)
 
         except:
             retry_count += 1
+            traceback.print_exc()
+            print("\nSomething unexpected happened. Let's wait a little bit...")
             time.sleep(EXCEPTION_TIME)
 
     if(not EXIT):
         send_notification("HELP! Crashed.")
+
+if __name__ == "__main__":
+    main()
