@@ -14,6 +14,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait as Wait
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 
 from sendgrid import SendGridAPIClient
@@ -43,10 +44,13 @@ REGEX_CONTINUE = "//a[contains(text(),'Continue')]" if COUNTRY_CODE.startswith('
 # def MY_CONDITION(month, day): return int(month) == 11 and int(day) >= 5
 def MY_CONDITION(month, day): return True # No custom condition wanted for the new scheduled date
 
+MINUTE = 60
+HOUR = MINUTE*60
+
 STEP_TIME = 0.5  # time between steps (interactions with forms): 0.5 seconds
 RETRY_TIME = 60*10  # wait time between retries/checks for available dates: 10 minutes
-COOLDOWN_TIME = 60*300  # wait time when temporary banned (empty list): originally 60 minutes, updated to make it 5 hours
-EXCEPTION_TIME = 60*30  # wait time when an exception occurs: 30 minutes
+COOLDOWN_TIME = 6*HOUR  # wait time when temporary banned (empty list): originally 60 minutes, updated to make it 6 hours
+EXCEPTION_TIME = HOUR  # wait time when an exception occurs: 1 hour
 
 DATE_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment/days/{FACILITY_ID}.json?appointments[expedite]=false"
 TIME_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment/times/{FACILITY_ID}.json?date=%s&appointments[expedite]=false"
@@ -93,19 +97,22 @@ def get_driver():
 driver = get_driver()
 
 
+def logout():
+    driver.get(f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/users/sign_out")
+
 def login():
     # Bypass reCAPTCHA
-    driver.get(f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv")
+    driver.get(f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/users/sign_in")
     time.sleep(STEP_TIME)
     a = driver.find_element(By.XPATH, '//a[@class="down-arrow bounce"]')
     a.click()
     time.sleep(STEP_TIME)
 
     print("Login start...")
-    href = driver.find_element(By.XPATH, '//*[@id="header"]/nav/div[2]/div[1]/ul/li[3]/a')
-    href.click()
-    time.sleep(STEP_TIME)
-    Wait(driver, 60).until(EC.presence_of_element_located((By.NAME, "commit")))
+    # href = driver.find_element(By.XPATH, '//*[@id="header"]/nav/div[2]/div[1]/ul/li[3]/a')
+    # href.click()
+    # time.sleep(STEP_TIME)
+    # Wait(driver, 60).until(EC.presence_of_element_located((By.NAME, "commit")))
 
     print("\tclick bounce")
     a = driver.find_element(By.XPATH, '//a[@class="down-arrow bounce"]')
@@ -141,26 +148,63 @@ def do_login_action():
     print("\tlogin successful!")
 
 
+# def get_date():
+#     driver.get(DATE_URL)
+#     time.sleep(20)
+#     if not is_logged_in():
+#         login()
+#         return get_date()
+#     else:
+#         content = driver.find_element(By.TAG_NAME, 'pre').text
+#         date = json.loads(content)
+#         return date
+
 def get_date():
-    driver.get(DATE_URL)
-    if not is_logged_in():
+    # if logged_out_dialog():
+    #     login()
+
+    # driver.get(DATE_URL)
+    driver.get(APPOINTMENT_URL)
+    session = driver.get_cookie("_yatri_session")["value"]
+    NEW_GET = driver.execute_script(
+        "var req = new XMLHttpRequest();req.open('GET', '"
+        + str(DATE_URL)
+        + "', false);req.setRequestHeader('Accept', 'application/json, text/javascript, */*; q=0.01');req.setRequestHeader('X-Requested-With', 'XMLHttpRequest'); req.setRequestHeader('Cookie', '_yatri_session="
+        + session
+        + "'); req.send(null);return req.responseText;"
+    )
+
+    data = json.loads(NEW_GET)
+    if "error" in data:
         login()
         return get_date()
     else:
-        content = driver.find_element(By.TAG_NAME, 'pre').text
-        date = json.loads(content)
-        return date
+        print("DATES: " + NEW_GET)
+        return json.loads(NEW_GET)
 
 
+# def get_time(date):
+#     time_url = TIME_URL % date
+#     driver.get(time_url)
+#     content = driver.find_element(By.TAG_NAME, 'pre').text
+#     data = json.loads(content)
+#     time = data.get("available_times")[-1]
+#     print(f"Got time successfully! {date} {time}")
+#     return time
 def get_time(date):
     time_url = TIME_URL % date
-    driver.get(time_url)
-    content = driver.find_element(By.TAG_NAME, 'pre').text
+    session = driver.get_cookie("_yatri_session")["value"]
+    content = driver.execute_script(
+        "var req = new XMLHttpRequest();req.open('GET', '"
+        + str(time_url)
+        + "', false);req.setRequestHeader('Accept', 'application/json, text/javascript, */*; q=0.01');req.setRequestHeader('X-Requested-With', 'XMLHttpRequest'); req.setRequestHeader('Cookie', '_yatri_session="
+        + session
+        + "'); req.send(null);return req.responseText;"
+    )
     data = json.loads(content)
     time = data.get("available_times")[-1]
     print(f"Got time successfully! {date} {time}")
     return time
-
 
 def reschedule(date):
     global EXIT
@@ -169,16 +213,17 @@ def reschedule(date):
     time = get_time(date)
     driver.get(APPOINTMENT_URL)
 
-    # This condition is required for the case when there's more than one applicant. This has not been tested properly
-    btn = driver.find_element(By.NAME, 'commit')
-    if btn:
-        btn.click()
-
     data = {
-        "utf8": driver.find_element(by=By.NAME, value='utf8').get_attribute('value'),
-        "authenticity_token": driver.find_element(by=By.NAME, value='authenticity_token').get_attribute('value'),
-        "confirmed_limit_message": driver.find_element(by=By.NAME, value='confirmed_limit_message').get_attribute('value'),
-        "use_consulate_appointment_capacity": driver.find_element(by=By.NAME, value='use_consulate_appointment_capacity').get_attribute('value'),
+        "utf8": driver.find_element(by=By.NAME, value="utf8").get_attribute("value"),
+        "authenticity_token": driver.find_element(
+            by=By.NAME, value="authenticity_token"
+        ).get_attribute("value"),
+        "confirmed_limit_message": driver.find_element(
+            by=By.NAME, value="confirmed_limit_message"
+        ).get_attribute("value"),
+        "use_consulate_appointment_capacity": driver.find_element(
+            by=By.NAME, value="use_consulate_appointment_capacity"
+        ).get_attribute("value"),
         "appointments[consulate_appointment][facility_id]": FACILITY_ID,
         "appointments[consulate_appointment][date]": date,
         "appointments[consulate_appointment][time]": time,
@@ -187,18 +232,19 @@ def reschedule(date):
     headers = {
         "User-Agent": driver.execute_script("return navigator.userAgent;"),
         "Referer": APPOINTMENT_URL,
-        "Cookie": "_yatri_session=" + driver.get_cookie("_yatri_session")["value"]
+        "Cookie": "_yatri_session=" + driver.get_cookie("_yatri_session")["value"],
     }
 
+    msg = f"NEW APPOINTMENT DATE AVAILABLE! {date} {time}"
+    send_notification(msg)
     r = requests.post(APPOINTMENT_URL, headers=headers, data=data)
-    if(r.text.find('Successfully Scheduled') != -1):
+    if r.text.find("You have successfully scheduled your visa appointment") != -1:
         msg = f"Rescheduled Successfully! {date} {time}"
         send_notification(msg)
         EXIT = True
     else:
-        msg = f"Reschedule Failed. {date} {time}"
+        msg = f"Reschedule Failed. {date} {time}: {r.text} \n\n{r.status_code}"
         send_notification(msg)
-
 
 def is_logged_in():
     content = driver.page_source
@@ -206,6 +252,19 @@ def is_logged_in():
         return False
     return True
 
+def is_logged_out():
+    try:
+        driver.find_element(By.XPATH, '//li/a[text()="Sign Out"]')
+        return False
+    except NoSuchElementException:
+        return True
+
+def logged_out_dialog():
+    btn = driver.find_element(By.XPATH, '//div[@class="ui-dialog infoPopUp ui-widget ui-widget-content ui-front ui-dialog-buttons"]/div/div/button')
+    if btn:
+        btn.click()
+        return True
+    return False
 
 def print_dates(dates):
     print("Available dates:")
@@ -254,7 +313,10 @@ def main():
     login()
     retry_count = 0
     while 1:
-        if retry_count > 6:
+        if is_logged_out():
+            login()
+
+        if retry_count > 25:
             break
         try:
             print("\n------------------")
@@ -265,6 +327,7 @@ def main():
             if not dates:
                 retry_count += 1
                 msg = "No US Visa appointment dates. List is empty"
+                logout()
                 send_notification(msg)
             else:
                 retry_count = 0
